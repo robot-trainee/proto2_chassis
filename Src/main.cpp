@@ -26,7 +26,13 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "rabcl/utils/type.hpp"
+#include "rabcl/interface/can.hpp"
+#include "rabcl/component/jga25_370.hpp"
+#include "rabcl/controller/omni_drive.hpp"
 
+#include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -47,6 +53,13 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+uint16_t control_count = 0;
+char printf_buf[100];
+
+rabcl::Info robot_data;
+rabcl::JGA25_370* right_motor;
+rabcl::JGA25_370* left_motor;
+rabcl::OmniDrive omni_drive(0.06, 0.28);
 
 /* USER CODE END PV */
 
@@ -58,7 +71,102 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+int16_t read_tim2_encoder_value()
+{
+  uint16_t enc_buff = TIM2->CNT;
+  int16_t enc_count = (int16_t)enc_buff - 32767;
+  TIM2->CNT = 32767;
+  return enc_count;
+}
 
+int16_t read_tim3_encoder_value()
+{
+  uint16_t enc_buff = TIM3->CNT;
+  int16_t enc_count = (int16_t)enc_buff - 32767;
+  TIM3->CNT = 32767;
+  return enc_count;
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim == &htim15)
+  {
+    control_count++;
+    if (control_count >= 10) // 100Hz
+    {
+      control_count = 0;
+      double chassis_vel[4];
+      omni_drive.CalcVel(
+        robot_data.chassis_vel_x_, robot_data.chassis_vel_y_, robot_data.chassis_vel_z_,
+        chassis_vel[0], chassis_vel[1], chassis_vel[2], chassis_vel[3]);
+      right_motor->SetCmdVel(chassis_vel[2]);
+      left_motor->SetCmdVel(chassis_vel[3]);
+
+      int16_t output;
+
+      // ---right motor
+      right_motor->SetEncoderCount(read_tim2_encoder_value());
+      right_motor->UpdataEncoder();
+      // snprintf(printf_buf, 100, "right_act_vel: %f[rad/s]\n", right_motor->GetActVel());
+      // HAL_UART_Transmit(&huart2, (uint8_t*)printf_buf, strlen(printf_buf), 1000);
+
+      output = right_motor->CalcMotorOutput();
+      // snprintf(printf_buf, 100, "right_output: %d[count]\n", output);
+      // HAL_UART_Transmit(&huart2, (uint8_t*)printf_buf, strlen(printf_buf), 1000);
+      if (output > 0)
+      {
+        HAL_GPIO_WritePin(RIGHT_MOTOR_PAHSE_GPIO_Port, RIGHT_MOTOR_PAHSE_Pin, GPIO_PIN_SET);
+      }
+      else
+      {
+        output *= -1;
+        HAL_GPIO_WritePin(RIGHT_MOTOR_PAHSE_GPIO_Port, RIGHT_MOTOR_PAHSE_Pin, GPIO_PIN_RESET);
+      }
+
+      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (uint16_t)output);
+      HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+      // snprintf(printf_buf, 100, "right_cmd_vel: %f[rad/s]\n", right_motor->GetCmdVel());
+      // HAL_UART_Transmit(&huart2, (uint8_t*)printf_buf, strlen(printf_buf), 1000);
+
+      // ---left motor
+      left_motor->SetEncoderCount(read_tim3_encoder_value());
+      left_motor->UpdataEncoder();
+      // snprintf(printf_buf, 100, "left_act_vel: %f[rad/s]\n", left_motor->GetActVel());
+      // HAL_UART_Transmit(&huart2, (uint8_t*)printf_buf, strlen(printf_buf), 1000);
+
+      output = left_motor->CalcMotorOutput();
+      // snprintf(printf_buf, 100, "left_output: %d[count]\n", output);
+      // HAL_UART_Transmit(&huart2, (uint8_t*)printf_buf, strlen(printf_buf), 1000);
+      if (output > 0)
+      {
+        HAL_GPIO_WritePin(LEFT_MOTOR_PAHSE_GPIO_Port, LEFT_MOTOR_PAHSE_Pin, GPIO_PIN_SET);
+      }
+      else
+      {
+        output *= -1;
+        HAL_GPIO_WritePin(LEFT_MOTOR_PAHSE_GPIO_Port, LEFT_MOTOR_PAHSE_Pin, GPIO_PIN_RESET);
+      }
+
+      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, (uint16_t)output);
+      HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+      // snprintf(printf_buf, 100, "left_cmd_vel: %f[rad/s]\n", left_motor->GetCmdVel());
+      // HAL_UART_Transmit(&huart2, (uint8_t*)printf_buf, strlen(printf_buf), 1000);
+    }
+  }
+}
+
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+  CAN_RxHeaderTypeDef RxHeader;
+  uint8_t RxData[8];
+  if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK)
+  {
+    if (rabcl::Can::UpdateData(RxHeader.StdId, RxData, robot_data))
+    {
+      HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+    }
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -69,6 +177,8 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+  right_motor = new rabcl::JGA25_370(1000 - 1, 34.0);
+  left_motor = new rabcl::JGA25_370(1000 - 1, 34.0);
 
   /* USER CODE END 1 */
 
@@ -98,6 +208,14 @@ int main(void)
   MX_TIM15_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  HAL_TIM_Base_Start_IT(&htim15);
+  HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
+  HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
+  HAL_CAN_Start(&hcan);
+  if (HAL_CAN_ActivateNotification(&hcan, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE END 2 */
 
